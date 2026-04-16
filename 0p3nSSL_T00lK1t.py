@@ -124,6 +124,8 @@ def show_menu() -> None:
     print("9) Verify and Dump Certificate Data Online (TLS + optional OCSP)")
     print("10) Verify and Dump CSR/PKCS#10 Data Locally")
     print("11) Verify and Dump PKCS#12 Data Locally")
+    print("\nValidation Utility")
+    print("12) DigiCert DCV - DNS TXT precheck")
     print("\n99) Exit")
 
 
@@ -608,6 +610,344 @@ def opt_install_check():
     print("\nINSTALL/CHECK PYTHON CRYPTO BACKEND\n")
     ensure_crypto()
 
+def _normalize_txt_values(raw: str) -> list:
+    """
+    Normalize TXT outputs coming from different resolvers/OS.
+    - strips quotes
+    - splits multiple TXT strings in a single answer
+    """
+    vals = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # remove enclosing quotes if present
+        if len(line) >= 2 and line[0] == '"' and line[-1] == '"':
+            line = line[1:-1]
+        # unescape \" -> "
+        line = line.replace(r'\"', '"')
+        vals.append(line)
+    return vals
+
+
+def _dns_query_txt_udp(name: str, server: str, timeout: float = 2.0) -> list:
+    """
+    Minimal DNS client (UDP) to query TXT records without external deps.
+    Returns a list of TXT strings (already concatenated per RR, RFC-compliant).
+    """
+    # Build DNS query (RFC 1035)
+    import random
+    import struct
+
+    def enc_qname(q: str) -> bytes:
+        q = q.rstrip(".")
+        out = b""
+        for part in q.split("."):
+            if not part:
+                continue
+            b = part.encode("idna")
+            if len(b) > 63:
+                raise ValueError("Label too long")
+            out += bytes([len(b)]) + b
+        return out + b"\x00"
+
+    tid = random.randint(0, 0xFFFF)
+    flags = 0x0100  # RD=1
+    qdcount, ancount, nscount, arcount = 1, 0, 0, 0
+    header = struct.pack("!HHHHHH", tid, flags, qdcount, ancount, nscount, arcount)
+    qname = enc_qname(name)
+    qtype = 16   # TXT
+    qclass = 1   # IN
+    question = qname + struct.pack("!HH", qtype, qclass)
+    packet = header + question
+
+    def skip_name(buf: bytes, off: int) -> int:
+        # handle pointers (compression)
+        while True:
+            if off >= len(buf):
+                raise ValueError("Truncated name")
+            l = buf[off]
+            if l == 0:
+                return off + 1
+            if (l & 0xC0) == 0xC0:
+                return off + 2
+            off += 1 + l
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(timeout)
+    try:
+        sock.sendto(packet, (server, 53))
+        data, _ = sock.recvfrom(4096)
+    finally:
+        sock.close()
+
+    if len(data) < 12:
+        return []
+
+    rid, rflags, rqd, ran, rns, rar = struct.unpack("!HHHHHH", data[:12])
+    if rid != tid:
+        return []
+    rcode = rflags & 0x000F
+    if rcode != 0:
+        return []  # NXDOMAIN / SERVFAIL / etc.
+
+    off = 12
+    # skip questions
+    for _i in range(rqd):
+        off = skip_name(data, off)
+        off += 4  # QTYPE+QCLASS
+
+    txt_values = []
+    # parse answers
+    for _i in range(ran):
+        off = skip_name(data, off)
+        if off + 10 > len(data):
+            break
+        rtype, rclass, ttl, rdlen = struct.unpack("!HHIH", data[off:off + 10])
+        off += 10
+        rdata = data[off:off + rdlen]
+        off += rdlen
+        if rclass != 1 or rtype != 16:
+            continue
+
+        # TXT RDATA: <len><chunk>... (concatenate chunks to single string)
+        p = 0
+        chunks = []
+        while p < len(rdata):
+            ln = rdata[p]
+            p += 1
+            chunk = rdata[p:p + ln]
+            p += ln
+            chunks.append(chunk)
+        try:
+            txt_values.append(b"".join(chunks).decode("utf-8", errors="replace"))
+        except Exception:
+            txt_values.append(b"".join(chunks).decode(errors="replace"))
+
+    return txt_values
+
+def _dns_query_txt_tcp(name: str, server: str, timeout: float = 3.0) -> list:
+    """
+    DNS over TCP fallback (RFC 1035) for truncated UDP answers (TC=1) or UDP-blocked envs.
+    Returns list of TXT strings.
+    """
+    import random
+    import struct
+
+    def enc_qname(q: str) -> bytes:
+        q = q.rstrip(".")
+        out = b""
+        for part in q.split("."):
+            if not part:
+                continue
+            b = part.encode("idna")
+            if len(b) > 63:
+                raise ValueError("Label too long")
+            out += bytes([len(b)]) + b
+        return out + b"\x00"
+
+    def skip_name(buf: bytes, off: int) -> int:
+        while True:
+            if off >= len(buf):
+                raise ValueError("Truncated name")
+            l = buf[off]
+            if l == 0:
+                return off + 1
+            if (l & 0xC0) == 0xC0:
+                return off + 2
+            off += 1 + l
+
+    tid = random.randint(0, 0xFFFF)
+    flags = 0x0100  # RD=1
+    header = struct.pack("!HHHHHH", tid, flags, 1, 0, 0, 0)
+    qname = enc_qname(name)
+    question = qname + struct.pack("!HH", 16, 1)  # TXT, IN
+    msg = header + question
+
+    # TCP DNS framing: 2-byte length prefix
+    payload = struct.pack("!H", len(msg)) + msg
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        sock.connect((server, 53))
+        sock.sendall(payload)
+
+        # Read length prefix
+        hdr = sock.recv(2)
+        if len(hdr) != 2:
+            return []
+        (mlen,) = struct.unpack("!H", hdr)
+
+        data = b""
+        while len(data) < mlen:
+            chunk = sock.recv(mlen - len(data))
+            if not chunk:
+                break
+            data += chunk
+    finally:
+        sock.close()
+
+    if len(data) < 12:
+        return []
+
+    rid, rflags, rqd, ran, rns, rar = struct.unpack("!HHHHHH", data[:12])
+    if rid != tid:
+        return []
+    rcode = rflags & 0x000F
+    if rcode != 0:
+        return []
+
+    off = 12
+    for _i in range(rqd):
+        off = skip_name(data, off)
+        off += 4
+
+    txt_values = []
+    for _i in range(ran):
+        off = skip_name(data, off)
+        if off + 10 > len(data):
+            break
+        rtype, rclass, ttl, rdlen = struct.unpack("!HHIH", data[off:off + 10])
+        off += 10
+        rdata = data[off:off + rdlen]
+        off += rdlen
+        if rclass != 1 or rtype != 16:
+            continue
+
+        p = 0
+        chunks = []
+        while p < len(rdata):
+            ln = rdata[p]
+            p += 1
+            chunks.append(rdata[p:p + ln])
+            p += ln
+        try:
+            txt_values.append(b"".join(chunks).decode("utf-8", errors="replace"))
+        except Exception:
+            txt_values.append(b"".join(chunks).decode(errors="replace"))
+
+    return txt_values
+
+
+def _dns_query_txt(name: str, server: str, timeout: float = 2.0) -> list:
+    """
+    Try UDP first; if response is truncated (TC=1) or yields nothing, fallback to TCP.
+    """
+    import random
+    import struct
+
+    # We keep UDP implementation as-is but detect TC bit by re-sending a tiny UDP query header parse.
+    # Minimal overhead; avoids rewriting your existing UDP parser.
+    def udp_tc_bit(qname: str) -> bool:
+        try:
+            # Build minimal UDP query to check flags quickly
+            def enc_qname(q: str) -> bytes:
+                q = q.rstrip(".")
+                out = b""
+                for part in q.split("."):
+                    if not part:
+                        continue
+                    b = part.encode("idna")
+                    out += bytes([len(b)]) + b
+                return out + b"\x00"
+
+            tid = random.randint(0, 0xFFFF)
+            flags = 0x0100
+            header = struct.pack("!HHHHHH", tid, flags, 1, 0, 0, 0)
+            question = enc_qname(qname) + struct.pack("!HH", 16, 1)
+            packet = header + question
+
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(timeout)
+            try:
+                s.sendto(packet, (server, 53))
+                data, _ = s.recvfrom(4096)
+            finally:
+                s.close()
+
+            if len(data) < 12:
+                return False
+            rid, rflags, *_ = struct.unpack("!HHHHHH", data[:12])
+            if rid != tid:
+                return False
+            tc = (rflags & 0x0200) != 0
+            return tc
+        except Exception:
+            return False
+
+    # 1) UDP parse (your existing logic)
+    vals = []
+    try:
+        vals = _dns_query_txt_udp(name, server, timeout=timeout)
+    except Exception:
+        vals = []
+
+    # 2) Fallback TCP if needed
+    if vals:
+        return vals
+
+    if udp_tc_bit(name):
+        # Truncated response very likely -> use TCP
+        try:
+            return _dns_query_txt_tcp(name, server, timeout=max(3.0, timeout))
+        except Exception:
+            return []
+
+    # If UDP gave nothing (maybe filtered), still try TCP once
+    try:
+        return _dns_query_txt_tcp(name, server, timeout=max(3.0, timeout))
+    except Exception:
+        return []
+
+def opt_dcv_dns_txt_precheck():
+    print("\nDIGICERT DCV - DNS TXT PRECHECK\n")
+
+    fqdn = prompt("TXT Record FQDN (e.g. _dnsauth.example.com) : ").strip()
+    if not fqdn:
+        return
+
+    expected = prompt("Expected TXT token (optional - press Enter to skip) : ").strip()
+
+    # Public resolvers (same rationale as bash: if visible here, DigiCert likely sees it)
+    resolvers = ["1.1.1.1", "8.8.8.8"]
+    any_ok = False
+
+    print("\nQuerying public DNS resolvers...\n")
+
+    for r in resolvers:
+        print(f"Resolver: {r}")
+        try:
+            vals = _dns_query_txt(fqdn, r, timeout=2.0)
+        except Exception as e:
+            print(f"  ERROR: DNS query failed: {e}\n")
+            continue
+
+        if not vals:
+            print("  No TXT record found (or not propagated yet).\n")
+            continue
+
+        # Print found TXT RRs
+        print("  Found TXT:")
+        for v in vals:
+            print(f"    - {v}")
+        print("")
+
+        if expected:
+            match = any(expected in v for v in vals)
+            if match:
+                print("  MATCH: expected token is present on this resolver.\n")
+                any_ok = True
+            else:
+                print("  NO MATCH: expected token not found on this resolver.\n")
+        else:
+            print("  OK: TXT record(s) present. (No token provided for strict match)\n")
+            any_ok = True
+
+    if any_ok:
+        print("PRECHECK RESULT: PASS (at least one resolver confirms expected state).")
+    else:
+        print("PRECHECK RESULT: FAIL (no resolver confirms expected state).")
 
 def opt_create_rsa_privkey():
     print("\nCREATING PRIVATE RSA ENCRYPTED KEY\n")
@@ -1102,6 +1442,9 @@ def read_option():
     elif choice == "11":
         clear_screen()
         opt_dump_pkcs12()
+    elif choice == "12":
+        clear_screen()
+        opt_dcv_dns_txt_precheck()
     elif choice == "99":
         print("\nHack the Planet |m|\n")
         raise SystemExit(0)
