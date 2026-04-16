@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# OpenSSL toolkit v1
+# OpenSSL toolkit v2
 # by Futurisiko
 
 # Text color declaration
@@ -38,7 +38,7 @@ ${colorreset}"
 show_menu() {
     echo "\n${green}Menu :${colorreset}"
     echo "\n${orange}Utility${colorreset}"
-    echo "1) Install OpenSSL"
+    echo "1) Install Requirements"
     echo "\n${orange}Key Tools${colorreset}"
     echo "2) Create a RSA Private Key AES/256 Encrypted"
     echo "3) Dump Private or Public Key (PEM) Data"
@@ -52,8 +52,12 @@ show_menu() {
     echo "9) Verify and Dump Certificate Data Online"
     echo "10) Verify and Dump CSR/PKCS#10 Data Locally"
     echo "11) Verify and Dump PKCS#12 Data Locally"
+	echo "\n${orange}Validations Utility${colorreset}"
+	echo "12) Check DNS TXT Entries for Domain Validation"
     echo "\n${orange}99) Exit${colorreset}"
 }
+
+# 
 
 # Choise handler and Functions
 read_option() {
@@ -63,9 +67,9 @@ read_option() {
     case $choice in
         1)
             clear
-            echo "\n${red}INSTALLING OPENSSL${colorreset}\n"
+            echo "\n${red}INSTALLING REQUIREMENTS${colorreset}\n"
             sudo apt update
-            sudo apt install openssl -y
+            sudo apt install openssl dnsutils -y
             ;;
         2)
             clear
@@ -279,9 +283,54 @@ read_option() {
                     ;;
             esac
             ;;
+		12)
+			clear
+			echo "\n${red}CHECK DNS TXT ENTRIES FOR DOMAIN VALIDATION${colorreset}\n"
+			read -p "TXT Record FQDN (e.g. _dnsauth.example.com) : " txt_fqdn
+			read -p "Expected TXT token (optional - press Enter to skip) : " expected_token
+			echo " "
+			echo "${orange}Querying public DNS resolvers...${colorreset}"
+			echo " "
+
+			# Resolver list (public + system default)
+			resolvers="1.1.1.1 8.8.8.8"
+
+			# Helper: normalize TXT output (strip quotes)
+			normalize_txt() {
+				sed 's/^"//; s/"$//; s/\\"/"/g'
+			}
+
+			if command -v dig >/dev/null 2>&1; then
+				for r in $resolvers; do
+					echo "${purple}Resolver: $r${colorreset}\n"
+					out=$(dig +time=2 +tries=1 +short TXT "$txt_fqdn" @"$r" 2>/dev/null | normalize_txt)
+					if [ -z "$out" ]; then
+						echo "${red}No TXT record found (or not propagated yet).${colorreset}\n"
+						continue
+					fi
+					echo "Found TXT:"
+					echo "$out" | sed 's/^/  - /'
+					echo " "
+					if [ -n "$expected_token" ]; then
+						echo "$out" | grep -Fq "$expected_token"
+						if [ $? -eq 0 ]; then
+							echo "${green}MATCH: expected token is present on resolver $r.${colorreset}\n"
+						else
+							echo "${red}NO MATCH: expected token not found on resolver $r.${colorreset}\n"
+						fi
+					else
+						echo "${green}OK: TXT record(s) present. (No token provided for strict match)${colorreset}\n"
+					fi
+				done
+			else
+				echo "\n${red}DIG not found on this system.${colorreset}"
+				echo "${orange}Install requirements.${colorreset}\n"
+			fi
+			;;
         99)
             echo "\n${green}Hack ${orange}the ${red}Planet ${colorreset}|m|\n"
-            exit 0 ;;
+            exit 0 
+			;;
         *)
             clear
             echo "\n${red}Invalid option. ${colorreset}Please try again."
