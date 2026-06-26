@@ -69,30 +69,3 @@ Help:
 ./0p3nSSL_T00lK1t.sh --help
 python3 0p3nSSL_T00lK1t.py --help
 ```
-
-## Private key generation
-
-Option `2` supports four practical combinations:
-
-- RSA 2048 encrypted with AES-256 password protection.
-- RSA 2048 unencrypted / no password.
-- RSA 4096 encrypted with AES-256 password protection.
-- RSA 4096 unencrypted / no password.
-
-Generated keys use timestamped filenames like:
-
-```text
-priv_key_RSA2048_enc_YYYYMMDD_HHMMSS.pem
-priv_key_RSA2048_nopass_YYYYMMDD_HHMMSS.pem
-priv_key_RSA4096_enc_YYYYMMDD_HHMMSS.pem
-priv_key_RSA4096_nopass_YYYYMMDD_HHMMSS.pem
-```
-
-## SAN input format
-
-CSR creation accepts optional SAN data using OpenSSL-style `subjectAltName` syntax:
-
-```text
-subjectAltName=DNS:www.example.com,DNS:example.com,IP:10.0.0.1,email:admin@example.com
-```
-
