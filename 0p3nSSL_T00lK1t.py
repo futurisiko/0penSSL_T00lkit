@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
-# OpenSSL toolkit v1 - OS-agnostic Python port (native OpenSSL via ssl + cryptography)
-# Colors removed. Screen clearing: clear at start of each selected action.
-# Updated: modern timezone-aware UTC datetimes + cryptography deprecation fixes + more readable dumps.
+"""
+0p3nSSL T00lK1t - Python implementation
+by Futurisiko
 
-import sys
+"""
+
+from __future__ import annotations
+
+import ipaddress
 import os
 import re
-import ipaddress
 import socket
 import ssl
+import subprocess
+import sys
 import warnings
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -18,15 +23,45 @@ from urllib.request import Request, urlopen
 
 
 # ---------------------------
-# Screen / UI utilities
+# Terminal UI
 # ---------------------------
 
+USE_COLOR = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
+
+
+class C:
+    RESET = "\033[0m" if USE_COLOR else ""
+    RED = "\033[31m" if USE_COLOR else ""
+    GREEN = "\033[32m" if USE_COLOR else ""
+    YELLOW = "\033[33m" if USE_COLOR else ""
+    BLUE = "\033[34m" if USE_COLOR else ""
+    MAGENTA = "\033[35m" if USE_COLOR else ""
+    CYAN = "\033[36m" if USE_COLOR else ""
+    BOLD = "\033[1m" if USE_COLOR else ""
+    DIM = "\033[2m" if USE_COLOR else ""
+
+
+def paint(text: str, *styles: str) -> str:
+    return "".join(styles) + text + C.RESET if USE_COLOR else text
+
+
+def ok(msg: str) -> None:
+    print(paint(msg, C.GREEN))
+
+
+def warn(msg: str) -> None:
+    print(paint(msg, C.YELLOW))
+
+
+def err(msg: str) -> None:
+    print(paint(msg, C.RED))
+
+
+def title(msg: str) -> None:
+    print(paint(msg, C.BOLD, C.CYAN))
+
+
 def clear_screen() -> None:
-    """
-    Clear terminal reliably across PowerShell/CMD and Bash/Zsh.
-    Primary: OS command (cls/clear) to avoid raw ANSI escapes showing up.
-    Fallback: ANSI clear only if stdout is a real TTY.
-    """
     cmd = "cls" if os.name == "nt" else "clear"
     try:
         rc = os.system(cmd)
@@ -34,52 +69,9 @@ def clear_screen() -> None:
             return
     except Exception:
         pass
-
-    # Fallback: ANSI only if TTY
-    try:
-        if sys.stdout.isatty():
-            sys.stdout.write("\033[2J\033[H")
-            sys.stdout.flush()
-    except Exception:
-        pass
-
-
-def ts() -> str:
-    return datetime.now().strftime("%Y%m%d_%H%M%S")
-
-
-def utc_now() -> datetime:
-    # Best practice: timezone-aware UTC datetime
-    return datetime.now(timezone.utc)
-
-
-def fmt_dt(dt: Optional[datetime]) -> str:
-    if dt is None:
-        return "N/A"
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    dt = dt.astimezone(timezone.utc)
-    return dt.isoformat().replace("+00:00", "Z")
-
-
-def list_dir() -> None:
-    # Cross-platform listing similar to `ls -l` (functional, not byte-identical)
-    try:
-        entries = sorted(os.listdir("."))
-    except Exception as e:
-        print(f"Cannot list directory: {e}")
-        return
-
-    print("Directory listing:")
-    for name in entries:
-        try:
-            st = os.stat(name)
-            size = st.st_size
-            mtime = datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
-            kind = "d" if os.path.isdir(name) else "-"
-            print(f"{kind} {size:>10}  {mtime}  {name}")
-        except Exception:
-            print(f"? {'':>10}  {'':>19}  {name}")
+    if sys.stdout.isatty():
+        sys.stdout.write("\033[2J\033[H")
+        sys.stdout.flush()
 
 
 def prompt(msg: str) -> str:
@@ -89,8 +81,47 @@ def prompt(msg: str) -> str:
         return ""
 
 
+def yes(value: str) -> bool:
+    return value.strip().lower() in {"y", "yes"}
+
+
+def ts() -> str:
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def fmt_dt(dt: Optional[datetime]) -> str:
+    if dt is None:
+        return "N/A"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def list_dir() -> None:
+    try:
+        entries = sorted(os.listdir("."))
+    except Exception as exc:
+        err(f"Cannot list directory: {exc}")
+        return
+
+    print(paint("Directory listing:", C.DIM))
+    for name in entries:
+        try:
+            st = os.stat(name)
+            size = st.st_size
+            mtime = datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+            kind = "d" if os.path.isdir(name) else "-"
+            print(f"{kind} {size:>10} {mtime} {name}")
+        except Exception:
+            print(f"? {'':>10} {'':>19} {name}")
+
+
 def show_banner() -> None:
-    print(r"""
+    print(paint(r"""
 -----------------------------------
 
 .d88b.                            8
@@ -104,33 +135,54 @@ def show_banner() -> None:
   8    Y8P   Y8P  8 8 Yb 8  Y8P
 
 --------------------by-Futurisiko--
-""")
+""".strip("\n"), C.MAGENTA))
 
 
 def show_menu() -> None:
-    print("\nMenu :")
-    print("\nUtility")
+    print(paint("\nMenu:", C.BOLD, C.GREEN))
+    print(paint("\nUtility", C.YELLOW))
+    print("0) Help / Notes")
     print("1) Install/Check Python crypto backend (cryptography)")
-    print("\nKey Tools")
-    print("2) Create a RSA Private Key AES/256 Encrypted (PEM)")
+    print(paint("\nKey Tools", C.YELLOW))
+    print("2) Create RSA Private Key - encrypted or unencrypted (PEM)")
     print("3) Dump Private or Public Key (PEM) Data")
-    print("\nCertificate Creation Tools")
+    print(paint("\nCertificate Creation Tools", C.YELLOW))
     print("4) Create Root Self-Signed Certificate")
     print("5) Create Generic CSR/PKCS#10 Request")
     print("6) Issue Certificate with CSR and Target CA")
-    print("7) Create a PKCS#12 with PrivKey,Cert and CertChain")
-    print("\nCertificate Dump Tools")
+    print("7) Create a PKCS#12 with PrivKey, Cert and CertChain")
+    print(paint("\nCertificate Dump Tools", C.YELLOW))
     print("8) Dump Certificate Data Locally")
     print("9) Verify and Dump Certificate Data Online (TLS + optional OCSP)")
     print("10) Verify and Dump CSR/PKCS#10 Data Locally")
     print("11) Verify and Dump PKCS#12 Data Locally")
-    print("\nValidation Utility")
+    print(paint("\nValidation Utility", C.YELLOW))
     print("12) DigiCert DCV - DNS TXT precheck")
-    print("\n99) Exit")
+    print(paint("\n99) Exit", C.YELLOW))
+
+
+def show_help() -> None:
+    title("HELP / NOTES")
+    print("""
+Usage:
+  python3 0p3nSSL_T00lK1t.py
+  python3 0p3nSSL_T00lK1t.py --help
+
+Notes:
+  - Generated filenames are timestamped to avoid accidental overwrite.
+  - RSA private keys can be generated as encrypted AES-256 PKCS#8 PEM files
+    or as unencrypted PKCS#8 PEM files.
+  - Unencrypted private keys are sensitive. Store them only in protected paths.
+  - Encrypted private keys require the password whenever they are loaded for CSR,
+    certificate signing, root CA creation or PKCS#12 creation.
+  - SAN input accepts values such as:
+    subjectAltName=DNS:www.example.com,DNS:example.com,IP:10.0.0.1,email:admin@example.com
+  - DNS TXT DCV checks query public resolvers 1.1.1.1 and 8.8.8.8.
+""".strip())
 
 
 # ---------------------------
-# Crypto backend (cryptography)
+# Crypto backend
 # ---------------------------
 
 @dataclass
@@ -154,6 +206,7 @@ def load_crypto() -> Optional[Crypto]:
         from cryptography.x509 import ocsp
         from cryptography.hazmat.primitives.serialization import pkcs12
         from cryptography.hazmat.backends import default_backend
+
         return Crypto(
             rsa=rsa,
             x509=x509,
@@ -174,23 +227,22 @@ CRYPTO = load_crypto()
 def ensure_crypto() -> bool:
     global CRYPTO
     if CRYPTO is not None:
-        print("cryptography backend: OK")
+        ok("cryptography backend: OK")
         return True
 
-    print("cryptography not found. Trying to install via pip...")
+    warn("cryptography not found. Trying to install via pip...")
     try:
-        import subprocess
         subprocess.run([sys.executable, "-m", "pip", "install", "cryptography"], check=False)
-    except Exception as e:
-        print(f"Install attempt failed: {e}")
+    except Exception as exc:
+        err(f"Install attempt failed: {exc}")
         return False
 
     CRYPTO = load_crypto()
     if CRYPTO is None:
-        print("cryptography still unavailable. Please install manually.")
+        err("cryptography still unavailable. Install it manually: python3 -m pip install cryptography")
         return False
 
-    print("cryptography installed and loaded.")
+    ok("cryptography installed and loaded.")
     return True
 
 
@@ -199,17 +251,17 @@ def ensure_crypto() -> bool:
 # ---------------------------
 
 def read_file_bytes(path: str) -> bytes:
-    with open(path, "rb") as f:
-        return f.read()
+    with open(path, "rb") as fh:
+        return fh.read()
 
 
 def write_file_bytes(path: str, data: bytes) -> None:
-    with open(path, "wb") as f:
-        f.write(data)
+    with open(path, "wb") as fh:
+        fh.write(data)
 
 
 # ---------------------------
-# Cert datetime helpers (avoid deprecation warnings)
+# PEM/Cert helpers
 # ---------------------------
 
 def cert_not_before(cert) -> Optional[datetime]:
@@ -220,102 +272,104 @@ def cert_not_after(cert) -> Optional[datetime]:
     return getattr(cert, "not_valid_after_utc", None) or getattr(cert, "not_valid_after", None)
 
 
-# ---------------------------
-# PEM load helpers
-# ---------------------------
-
 def load_private_key_pem(path: str):
     if not ensure_crypto():
         return None
-    data = read_file_bytes(path)
+    try:
+        data = read_file_bytes(path)
+    except Exception as exc:
+        err(f"Cannot read private key: {exc}")
+        return None
+
     pw = getpass("Private key password (empty if none): ")
     password = pw.encode() if pw else None
     try:
         return CRYPTO.serialization.load_pem_private_key(data, password=password)
     except TypeError:
-        return CRYPTO.serialization.load_pem_private_key(data, password=password, backend=CRYPTO.default_backend())
-    except Exception as e:
-        print(f"Failed to load private key: {e}")
+        return CRYPTO.serialization.load_pem_private_key(
+            data, password=password, backend=CRYPTO.default_backend()
+        )
+    except Exception as exc:
+        err(f"Failed to load private key: {exc}")
         return None
 
 
 def load_cert_pem(path: str):
     if not ensure_crypto():
         return None
-    data = read_file_bytes(path)
+    try:
+        data = read_file_bytes(path)
+    except Exception as exc:
+        err(f"Cannot read certificate: {exc}")
+        return None
+
     try:
         return CRYPTO.x509.load_pem_x509_certificate(data)
     except TypeError:
         return CRYPTO.x509.load_pem_x509_certificate(data, backend=CRYPTO.default_backend())
-    except Exception as e:
-        print(f"Failed to load certificate: {e}")
+    except Exception as exc:
+        err(f"Failed to load certificate: {exc}")
         return None
 
 
 def load_csr_pem(path: str):
     if not ensure_crypto():
         return None
-    data = read_file_bytes(path)
+    try:
+        data = read_file_bytes(path)
+    except Exception as exc:
+        err(f"Cannot read CSR: {exc}")
+        return None
+
     try:
         return CRYPTO.x509.load_pem_x509_csr(data)
     except TypeError:
         return CRYPTO.x509.load_pem_x509_csr(data, backend=CRYPTO.default_backend())
-    except Exception as e:
-        print(f"Failed to load CSR: {e}")
+    except Exception as exc:
+        err(f"Failed to load CSR: {exc}")
         return None
 
-
-# ---------------------------
-# Parse subjectAltName addext
-# ---------------------------
 
 def parse_addext_subject_alt_name(addext: str):
     if not ensure_crypto():
         return None
-
     addext = addext.strip()
     if not addext:
         return None
 
-    if addext.lower().startswith("subjectaltname="):
-        payload = addext.split("=", 1)[1].strip()
-    else:
-        payload = addext
-
+    payload = addext.split("=", 1)[1].strip() if addext.lower().startswith("subjectaltname=") else addext
     items = [x.strip() for x in payload.split(",") if x.strip()]
     if not items:
         return None
 
-    gn = []
+    general_names = []
     bad = []
-    for it in items:
-        if ":" not in it:
-            bad.append(it)
+    for item in items:
+        if ":" not in item:
+            bad.append(item)
             continue
-        k, v = it.split(":", 1)
-        k = k.strip().lower()
-        v = v.strip()
+        key, value = item.split(":", 1)
+        key = key.strip().lower()
+        value = value.strip()
         try:
-            if k == "dns":
-                gn.append(CRYPTO.x509.DNSName(v))
-            elif k == "ip":
-                gn.append(CRYPTO.x509.IPAddress(ipaddress.ip_address(v)))
-            elif k in ("email", "emailaddress"):
-                gn.append(CRYPTO.x509.RFC822Name(v))
-            elif k == "uri":
-                gn.append(CRYPTO.x509.UniformResourceIdentifier(v))
+            if key == "dns":
+                general_names.append(CRYPTO.x509.DNSName(value))
+            elif key == "ip":
+                general_names.append(CRYPTO.x509.IPAddress(ipaddress.ip_address(value)))
+            elif key in {"email", "emailaddress"}:
+                general_names.append(CRYPTO.x509.RFC822Name(value))
+            elif key == "uri":
+                general_names.append(CRYPTO.x509.UniformResourceIdentifier(value))
             else:
-                bad.append(it)
+                bad.append(item)
         except Exception:
-            bad.append(it)
+            bad.append(item)
 
     if bad:
-        print(f"WARNING: skipped invalid SAN items: {', '.join(bad)}")
-
-    if not gn:
+        warn(f"Skipped invalid SAN item(s): {', '.join(bad)}")
+    if not general_names:
         return None
-
-    return CRYPTO.x509.SubjectAlternativeName(gn)
+    return CRYPTO.x509.SubjectAlternativeName(general_names)
 
 
 # ---------------------------
@@ -324,21 +378,21 @@ def parse_addext_subject_alt_name(addext: str):
 
 def dump_private_key_text(priv) -> str:
     pub = priv.public_key()
-    lines = []
-    lines.append("===== PRIVATE KEY =====")
+    lines = ["===== PRIVATE KEY ====="]
     if hasattr(priv, "key_size"):
         lines.append(f"Key Size: {priv.key_size}")
-
     try:
         nums = priv.private_numbers()
         pubn = nums.public_numbers
-        lines.append("Type: RSA")
-        lines.append(f"Public Exponent (e): {pubn.e}")
-        lines.append(f"Modulus (n): {pubn.n.bit_length()} bits")
-        lines.append(f"Modulus (n) hex: {hex(pubn.n)}")
-        lines.append(f"Private Exponent (d): {nums.d.bit_length()} bits")
+        lines.extend([
+            "Type: RSA",
+            f"Public Exponent (e): {pubn.e}",
+            f"Modulus (n): {pubn.n.bit_length()} bits",
+            f"Modulus (n) hex: {hex(pubn.n)}",
+            f"Private Exponent (d): {nums.d.bit_length()} bits",
+        ])
     except Exception:
-        lines.append("Type: (unsupported for detailed dump)")
+        lines.append("Type: unsupported for detailed dump")
 
     pem_pub = pub.public_bytes(
         encoding=CRYPTO.serialization.Encoding.PEM,
@@ -348,24 +402,42 @@ def dump_private_key_text(priv) -> str:
     return "\n".join(lines) + "\n"
 
 
-def dump_cert_text(cert) -> str:
+def render_general_names(value) -> list[str]:
     lines = []
-    lines.append("===== CERTIFICATE =====\n")
-    lines.append("Subject")
-    lines.append(f"  {cert.subject.rfc4514_string() or '(empty)'}\n")
-    lines.append("Issuer")
-    lines.append(f"  {cert.issuer.rfc4514_string() or '(empty)'}\n")
+    try:
+        dns = value.get_values_for_type(CRYPTO.x509.DNSName)
+        ips = value.get_values_for_type(CRYPTO.x509.IPAddress)
+        emails = value.get_values_for_type(CRYPTO.x509.RFC822Name)
+        uris = value.get_values_for_type(CRYPTO.x509.UniformResourceIdentifier)
+        if dns:
+            lines.append(f"    DNS   : {', '.join(dns)}")
+        if ips:
+            lines.append(f"    IP    : {', '.join(str(x) for x in ips)}")
+        if emails:
+            lines.append(f"    Email : {', '.join(emails)}")
+        if uris:
+            lines.append(f"    URI   : {', '.join(uris)}")
+    except Exception:
+        lines.append(f"    {value}")
+    return lines
 
-    lines.append("Metadata")
-    lines.append(f"  Serial Number : {hex(cert.serial_number)}")
-    lines.append(f"  Version       : {getattr(getattr(cert, 'version', None), 'name', 'unknown')}")
-    lines.append(f"  Signature Hash: {cert.signature_hash_algorithm.name if cert.signature_hash_algorithm else 'unknown'}\n")
 
-    lines.append("Validity (UTC)")
-    lines.append(f"  Not Before: {fmt_dt(cert_not_before(cert))}")
-    lines.append(f"  Not After : {fmt_dt(cert_not_after(cert))}\n")
-
-    lines.append("Extensions")
+def dump_cert_text(cert) -> str:
+    lines = [
+        "===== CERTIFICATE =====\n",
+        "Subject",
+        f"  {cert.subject.rfc4514_string() or '(empty)'}\n",
+        "Issuer",
+        f"  {cert.issuer.rfc4514_string() or '(empty)'}\n",
+        "Metadata",
+        f"  Serial Number : {hex(cert.serial_number)}",
+        f"  Version       : {getattr(getattr(cert, 'version', None), 'name', 'unknown')}",
+        f"  Signature Hash: {cert.signature_hash_algorithm.name if cert.signature_hash_algorithm else 'unknown'}\n",
+        "Validity (UTC)",
+        f"  Not Before: {fmt_dt(cert_not_before(cert))}",
+        f"  Not After : {fmt_dt(cert_not_after(cert))}\n",
+        "Extensions",
+    ]
     if not cert.extensions:
         lines.append("  (none)")
         return "\n".join(lines) + "\n"
@@ -373,68 +445,35 @@ def dump_cert_text(cert) -> str:
     for ext in cert.extensions:
         name = getattr(ext.oid, "_name", None) or ext.oid.dotted_string
         lines.append(f"  - {name} (critical={ext.critical})")
-        v = ext.value
-
-        # Human-friendly rendering while keeping full info
+        value = ext.value
         try:
-            if hasattr(v, "get_values_for_type") and name.lower().endswith("subject alternative name"):
-                dns = v.get_values_for_type(CRYPTO.x509.DNSName)
-                ips = v.get_values_for_type(CRYPTO.x509.IPAddress)
-                emails = v.get_values_for_type(CRYPTO.x509.RFC822Name)
-                uris = v.get_values_for_type(CRYPTO.x509.UniformResourceIdentifier)
-                if dns:
-                    lines.append(f"      DNS   : {', '.join(dns)}")
-                if ips:
-                    lines.append(f"      IP    : {', '.join([str(x) for x in ips])}")
-                if emails:
-                    lines.append(f"      Email : {', '.join(emails)}")
-                if uris:
-                    lines.append(f"      URI   : {', '.join(uris)}")
-                continue
-
-            if isinstance(v, CRYPTO.x509.BasicConstraints):
-                lines.append(f"      CA          : {v.ca}")
-                lines.append(f"      Path Length : {v.path_length}")
-                continue
-
-            if isinstance(v, CRYPTO.x509.KeyUsage):
-                lines.append(f"      digital_signature : {v.digital_signature}")
-                lines.append(f"      content_commitment: {v.content_commitment}")
-                lines.append(f"      key_encipherment  : {v.key_encipherment}")
-                lines.append(f"      data_encipherment : {v.data_encipherment}")
-                lines.append(f"      key_agreement     : {v.key_agreement}")
-                lines.append(f"      key_cert_sign     : {v.key_cert_sign}")
-                lines.append(f"      crl_sign          : {v.crl_sign}")
-                lines.append(f"      encipher_only     : {v.encipher_only}")
-                lines.append(f"      decipher_only     : {v.decipher_only}")
-                continue
-
-            if isinstance(v, CRYPTO.x509.ExtendedKeyUsage):
-                oids = []
-                for oid in v:
-                    oids.append(getattr(oid, "_name", None) or oid.dotted_string)
-                lines.append(f"      {', '.join(oids) if oids else '(empty)'}")
-                continue
-
-            # fallback
-            lines.append(f"      {v}")
+            if isinstance(value, CRYPTO.x509.SubjectAlternativeName):
+                lines.extend(render_general_names(value))
+            elif isinstance(value, CRYPTO.x509.BasicConstraints):
+                lines.append(f"    CA         : {value.ca}")
+                lines.append(f"    Path Length: {value.path_length}")
+            elif isinstance(value, CRYPTO.x509.KeyUsage):
+                lines.append(f"    digital_signature : {value.digital_signature}")
+                lines.append(f"    key_encipherment  : {value.key_encipherment}")
+                lines.append(f"    key_cert_sign     : {value.key_cert_sign}")
+                lines.append(f"    crl_sign          : {value.crl_sign}")
+            elif isinstance(value, CRYPTO.x509.ExtendedKeyUsage):
+                usages = [getattr(oid, "_name", None) or oid.dotted_string for oid in value]
+                lines.append(f"    {', '.join(usages) if usages else '(empty)'}")
+            else:
+                lines.append(f"    {value}")
         except Exception:
-            try:
-                lines.append(f"      {v}")
-            except Exception:
-                lines.append("      (unprintable)")
-
+            lines.append("    (cannot render extension)")
     return "\n".join(lines) + "\n"
 
 
 def dump_csr_text(csr) -> str:
-    lines = []
-    lines.append("===== CSR (PKCS#10) =====\n")
-
-    lines.append("Subject")
-    lines.append(f"  {csr.subject.rfc4514_string() or '(empty)'}\n")
-
-    lines.append("Public Key")
+    lines = [
+        "===== CSR (PKCS#10) =====\n",
+        "Subject",
+        f"  {csr.subject.rfc4514_string() or '(empty)'}\n",
+        "Public Key",
+    ]
     try:
         pub = csr.public_key()
         lines.append(f"  Type    : {pub.__class__.__name__}")
@@ -443,57 +482,37 @@ def dump_csr_text(csr) -> str:
         try:
             nums = pub.public_numbers()
             if hasattr(nums, "e") and hasattr(nums, "n"):
-                lines.append(f"  Exponent (e): {nums.e}")
-                lines.append(f"  Modulus  (n): {nums.n.bit_length()} bits")
+                lines.append(f"  Exponent: {nums.e}")
+                lines.append(f"  Modulus : {nums.n.bit_length()} bits")
         except Exception:
             pass
-    except Exception as e:
-        lines.append(f"  (cannot read public key: {e})")
-    lines.append("")
+    except Exception as exc:
+        lines.append(f"  Cannot read public key: {exc}")
 
-    lines.append("Signature")
+    lines.append("\nSignature")
     try:
         lines.append(f"  Signature Valid: {csr.is_signature_valid}")
     except Exception:
-        lines.append("  Signature Valid: (unknown)")
-    lines.append("")
+        lines.append("  Signature Valid: unknown")
 
-    lines.append("Requested Extensions")
+    lines.append("\nRequested Extensions")
     try:
-        exts = csr.extensions
-        if not exts:
+        if not csr.extensions:
             lines.append("  (none)")
-        else:
-            for ext in exts:
-                name = getattr(ext.oid, "_name", None) or ext.oid.dotted_string
-                lines.append(f"  - {name} (critical={ext.critical})")
-                v = ext.value
-                try:
-                    if hasattr(v, "get_values_for_type") and name.lower().endswith("subject alternative name"):
-                        dns = v.get_values_for_type(CRYPTO.x509.DNSName)
-                        ips = v.get_values_for_type(CRYPTO.x509.IPAddress)
-                        emails = v.get_values_for_type(CRYPTO.x509.RFC822Name)
-                        uris = v.get_values_for_type(CRYPTO.x509.UniformResourceIdentifier)
-                        if dns:
-                            lines.append(f"      DNS   : {', '.join(dns)}")
-                        if ips:
-                            lines.append(f"      IP    : {', '.join([str(x) for x in ips])}")
-                        if emails:
-                            lines.append(f"      Email : {', '.join(emails)}")
-                        if uris:
-                            lines.append(f"      URI   : {', '.join(uris)}")
-                    else:
-                        lines.append(f"      {v}")
-                except Exception:
-                    lines.append("      (cannot render extension)")
+        for ext in csr.extensions:
+            name = getattr(ext.oid, "_name", None) or ext.oid.dotted_string
+            lines.append(f"  - {name} (critical={ext.critical})")
+            if isinstance(ext.value, CRYPTO.x509.SubjectAlternativeName):
+                lines.extend(render_general_names(ext.value))
+            else:
+                lines.append(f"    {ext.value}")
     except Exception:
-        lines.append("  (cannot read extensions)")
-
+        lines.append("  Cannot read extensions")
     return "\n".join(lines) + "\n"
 
 
 # ---------------------------
-# Online TLS cert fetch (stdlib ssl)
+# Network helpers
 # ---------------------------
 
 def fetch_server_leaf_cert_der(host: str, port: int, timeout: int = 10) -> bytes:
@@ -503,23 +522,10 @@ def fetch_server_leaf_cert_der(host: str, port: int, timeout: int = 10) -> bytes
             return ssock.getpeercert(binary_form=True)
 
 
-def extract_aia_uris(cert) -> Tuple[Optional[str], Optional[str]]:
-    ocsp_url = None
-    issuer_url = None
-    try:
-        from cryptography.x509.oid import ExtensionOID, AuthorityInformationAccessOID
-        aia = cert.extensions.get_extension_for_oid(ExtensionOID.AUTHORITY_INFORMATION_ACCESS).value
-        for desc in aia:
-            method = desc.access_method
-            loc = desc.access_location
-            if isinstance(loc, CRYPTO.x509.UniformResourceIdentifier):
-                if method == AuthorityInformationAccessOID.OCSP and ocsp_url is None:
-                    ocsp_url = loc.value
-                if method == AuthorityInformationAccessOID.CA_ISSUERS and issuer_url is None:
-                    issuer_url = loc.value
-    except Exception:
-        pass
-    return ocsp_url, issuer_url
+def http_get(url: str) -> bytes:
+    req = Request(url, headers={"User-Agent": "Python"})
+    with urlopen(req, timeout=20) as resp:
+        return resp.read()
 
 
 def http_post(url: str, body: bytes, content_type: str) -> bytes:
@@ -529,22 +535,35 @@ def http_post(url: str, body: bytes, content_type: str) -> bytes:
         method="POST",
         headers={"Content-Type": content_type, "User-Agent": "Python"},
     )
-    with urlopen(req, timeout=20) as r:
-        return r.read()
+    with urlopen(req, timeout=20) as resp:
+        return resp.read()
 
 
-def http_get(url: str) -> bytes:
-    req = Request(url, headers={"User-Agent": "Python"})
-    with urlopen(req, timeout=20) as r:
-        return r.read()
+def extract_aia_uris(cert) -> Tuple[Optional[str], Optional[str]]:
+    ocsp_url = None
+    issuer_url = None
+    try:
+        from cryptography.x509.oid import AuthorityInformationAccessOID, ExtensionOID
+
+        aia = cert.extensions.get_extension_for_oid(ExtensionOID.AUTHORITY_INFORMATION_ACCESS).value
+        for desc in aia:
+            loc = desc.access_location
+            if not isinstance(loc, CRYPTO.x509.UniformResourceIdentifier):
+                continue
+            if desc.access_method == AuthorityInformationAccessOID.OCSP and ocsp_url is None:
+                ocsp_url = loc.value
+            if desc.access_method == AuthorityInformationAccessOID.CA_ISSUERS and issuer_url is None:
+                issuer_url = loc.value
+    except Exception:
+        pass
+    return ocsp_url, issuer_url
 
 
 def do_ocsp_query(leaf_cert, issuer_cert, ocsp_url: str) -> str:
-    # Local helper: avoid touching deprecated naive-datetime properties unless we suppress warnings
     try:
         from cryptography.utils import CryptographyDeprecationWarning  # type: ignore
-    except Exception:  # pragma: no cover
-        class CryptographyDeprecationWarning(Warning):  # fallback
+    except Exception:
+        class CryptographyDeprecationWarning(Warning):
             pass
 
     def ocsp_dt(obj, utc_attr: str, legacy_attr: str) -> Optional[datetime]:
@@ -553,7 +572,6 @@ def do_ocsp_query(leaf_cert, issuer_cert, ocsp_url: str) -> str:
                 return getattr(obj, utc_attr)
             except Exception:
                 return None
-        # Older cryptography: legacy attrs may exist but warn -> suppress only here
         if hasattr(obj, legacy_attr):
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", category=CryptographyDeprecationWarning)
@@ -563,115 +581,64 @@ def do_ocsp_query(leaf_cert, issuer_cert, ocsp_url: str) -> str:
                     return None
         return None
 
-    builder = CRYPTO.ocsp.OCSPRequestBuilder()
-    builder = builder.add_certificate(leaf_cert, issuer_cert, CRYPTO.hashes.SHA1())
-    req = builder.build()
-    req_bytes = req.public_bytes(CRYPTO.serialization.Encoding.DER)
-
+    builder = CRYPTO.ocsp.OCSPRequestBuilder().add_certificate(
+        leaf_cert, issuer_cert, CRYPTO.hashes.SHA1()
+    )
+    request_bytes = builder.build().public_bytes(CRYPTO.serialization.Encoding.DER)
     try:
-        resp_bytes = http_post(ocsp_url, req_bytes, "application/ocsp-request")
-        ocsp_resp = CRYPTO.ocsp.load_der_ocsp_response(resp_bytes)
-    except Exception as e:
-        return f"OCSP query failed: {e}\n"
+        response_bytes = http_post(ocsp_url, request_bytes, "application/ocsp-request")
+        ocsp_resp = CRYPTO.ocsp.load_der_ocsp_response(response_bytes)
+    except Exception as exc:
+        return f"OCSP query failed: {exc}\n"
 
-    lines = []
-    lines.append("===== OCSP RESPONSE =====")
-    try:
-        lines.append(f"  Response Status: {ocsp_resp.response_status}")
-    except Exception:
-        pass
-
+    lines = ["===== OCSP RESPONSE =====", f"Response Status: {ocsp_resp.response_status}"]
     if ocsp_resp.response_status != CRYPTO.ocsp.OCSPResponseStatus.SUCCESSFUL:
         return "\n".join(lines) + "\n"
 
     try:
-        lines.append(f"  Certificate Status: {ocsp_resp.certificate_status}")
-
-        this_u = ocsp_dt(ocsp_resp, "this_update_utc", "this_update")
-        next_u = ocsp_dt(ocsp_resp, "next_update_utc", "next_update")
-        rev_t = ocsp_dt(ocsp_resp, "revocation_time_utc", "revocation_time")
-
-        lines.append(f"  This Update (UTC): {fmt_dt(this_u)}")
-        lines.append(f"  Next Update (UTC): {fmt_dt(next_u)}")
-        lines.append(f"  Revocation Time  : {fmt_dt(rev_t)}")
-        lines.append(f"  Revocation Reason: {ocsp_resp.revocation_reason}")
+        lines.append(f"Certificate Status: {ocsp_resp.certificate_status}")
+        lines.append(f"This Update (UTC): {fmt_dt(ocsp_dt(ocsp_resp, 'this_update_utc', 'this_update'))}")
+        lines.append(f"Next Update (UTC): {fmt_dt(ocsp_dt(ocsp_resp, 'next_update_utc', 'next_update'))}")
+        lines.append(f"Revocation Time : {fmt_dt(ocsp_dt(ocsp_resp, 'revocation_time_utc', 'revocation_time'))}")
+        lines.append(f"Revocation Reason: {ocsp_resp.revocation_reason}")
     except Exception:
         pass
-
     return "\n".join(lines) + "\n"
 
 
 # ---------------------------
-# Option handlers
-# (screen clear happens in router, before calling these)
+# DNS TXT helper
 # ---------------------------
 
-def opt_install_check():
-    print("\nINSTALL/CHECK PYTHON CRYPTO BACKEND\n")
-    ensure_crypto()
-
-def _normalize_txt_values(raw: str) -> list:
-    """
-    Normalize TXT outputs coming from different resolvers/OS.
-    - strips quotes
-    - splits multiple TXT strings in a single answer
-    """
-    vals = []
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        # remove enclosing quotes if present
-        if len(line) >= 2 and line[0] == '"' and line[-1] == '"':
-            line = line[1:-1]
-        # unescape \" -> "
-        line = line.replace(r'\"', '"')
-        vals.append(line)
-    return vals
-
-
-def _dns_query_txt_udp(name: str, server: str, timeout: float = 2.0) -> list:
-    """
-    Minimal DNS client (UDP) to query TXT records without external deps.
-    Returns a list of TXT strings (already concatenated per RR, RFC-compliant).
-    """
-    # Build DNS query (RFC 1035)
+def _dns_query_txt_udp(name: str, server: str, timeout: float = 2.0) -> list[str]:
     import random
     import struct
 
     def enc_qname(q: str) -> bytes:
-        q = q.rstrip(".")
         out = b""
-        for part in q.split("."):
+        for part in q.rstrip(".").split("."):
             if not part:
                 continue
-            b = part.encode("idna")
-            if len(b) > 63:
-                raise ValueError("Label too long")
-            out += bytes([len(b)]) + b
+            label = part.encode("idna")
+            if len(label) > 63:
+                raise ValueError("DNS label too long")
+            out += bytes([len(label)]) + label
         return out + b"\x00"
 
-    tid = random.randint(0, 0xFFFF)
-    flags = 0x0100  # RD=1
-    qdcount, ancount, nscount, arcount = 1, 0, 0, 0
-    header = struct.pack("!HHHHHH", tid, flags, qdcount, ancount, nscount, arcount)
-    qname = enc_qname(name)
-    qtype = 16   # TXT
-    qclass = 1   # IN
-    question = qname + struct.pack("!HH", qtype, qclass)
-    packet = header + question
-
-    def skip_name(buf: bytes, off: int) -> int:
-        # handle pointers (compression)
+    def skip_name(buf: bytes, offset: int) -> int:
         while True:
-            if off >= len(buf):
-                raise ValueError("Truncated name")
-            l = buf[off]
-            if l == 0:
-                return off + 1
-            if (l & 0xC0) == 0xC0:
-                return off + 2
-            off += 1 + l
+            if offset >= len(buf):
+                raise ValueError("Truncated DNS name")
+            length = buf[offset]
+            if length == 0:
+                return offset + 1
+            if (length & 0xC0) == 0xC0:
+                return offset + 2
+            offset += 1 + length
+
+    txid = random.randint(0, 0xFFFF)
+    packet = struct.pack("!HHHHHH", txid, 0x0100, 1, 0, 0, 0)
+    packet += enc_qname(name) + struct.pack("!HH", 16, 1)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.settimeout(timeout)
@@ -683,138 +650,25 @@ def _dns_query_txt_udp(name: str, server: str, timeout: float = 2.0) -> list:
 
     if len(data) < 12:
         return []
-
-    rid, rflags, rqd, ran, rns, rar = struct.unpack("!HHHHHH", data[:12])
-    if rid != tid:
+    rid, flags, qdcount, ancount, _, _ = struct.unpack("!HHHHHH", data[:12])
+    if rid != txid or flags & 0x000F:
         return []
-    rcode = rflags & 0x000F
-    if rcode != 0:
-        return []  # NXDOMAIN / SERVFAIL / etc.
 
-    off = 12
-    # skip questions
-    for _i in range(rqd):
-        off = skip_name(data, off)
-        off += 4  # QTYPE+QCLASS
+    offset = 12
+    for _ in range(qdcount):
+        offset = skip_name(data, offset) + 4
 
-    txt_values = []
-    # parse answers
-    for _i in range(ran):
-        off = skip_name(data, off)
-        if off + 10 > len(data):
+    values = []
+    for _ in range(ancount):
+        offset = skip_name(data, offset)
+        if offset + 10 > len(data):
             break
-        rtype, rclass, ttl, rdlen = struct.unpack("!HHIH", data[off:off + 10])
-        off += 10
-        rdata = data[off:off + rdlen]
-        off += rdlen
+        rtype, rclass, _, rdlen = struct.unpack("!HHIH", data[offset:offset + 10])
+        offset += 10
+        rdata = data[offset:offset + rdlen]
+        offset += rdlen
         if rclass != 1 or rtype != 16:
             continue
-
-        # TXT RDATA: <len><chunk>... (concatenate chunks to single string)
-        p = 0
-        chunks = []
-        while p < len(rdata):
-            ln = rdata[p]
-            p += 1
-            chunk = rdata[p:p + ln]
-            p += ln
-            chunks.append(chunk)
-        try:
-            txt_values.append(b"".join(chunks).decode("utf-8", errors="replace"))
-        except Exception:
-            txt_values.append(b"".join(chunks).decode(errors="replace"))
-
-    return txt_values
-
-def _dns_query_txt_tcp(name: str, server: str, timeout: float = 3.0) -> list:
-    """
-    DNS over TCP fallback (RFC 1035) for truncated UDP answers (TC=1) or UDP-blocked envs.
-    Returns list of TXT strings.
-    """
-    import random
-    import struct
-
-    def enc_qname(q: str) -> bytes:
-        q = q.rstrip(".")
-        out = b""
-        for part in q.split("."):
-            if not part:
-                continue
-            b = part.encode("idna")
-            if len(b) > 63:
-                raise ValueError("Label too long")
-            out += bytes([len(b)]) + b
-        return out + b"\x00"
-
-    def skip_name(buf: bytes, off: int) -> int:
-        while True:
-            if off >= len(buf):
-                raise ValueError("Truncated name")
-            l = buf[off]
-            if l == 0:
-                return off + 1
-            if (l & 0xC0) == 0xC0:
-                return off + 2
-            off += 1 + l
-
-    tid = random.randint(0, 0xFFFF)
-    flags = 0x0100  # RD=1
-    header = struct.pack("!HHHHHH", tid, flags, 1, 0, 0, 0)
-    qname = enc_qname(name)
-    question = qname + struct.pack("!HH", 16, 1)  # TXT, IN
-    msg = header + question
-
-    # TCP DNS framing: 2-byte length prefix
-    payload = struct.pack("!H", len(msg)) + msg
-
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(timeout)
-    try:
-        sock.connect((server, 53))
-        sock.sendall(payload)
-
-        # Read length prefix
-        hdr = sock.recv(2)
-        if len(hdr) != 2:
-            return []
-        (mlen,) = struct.unpack("!H", hdr)
-
-        data = b""
-        while len(data) < mlen:
-            chunk = sock.recv(mlen - len(data))
-            if not chunk:
-                break
-            data += chunk
-    finally:
-        sock.close()
-
-    if len(data) < 12:
-        return []
-
-    rid, rflags, rqd, ran, rns, rar = struct.unpack("!HHHHHH", data[:12])
-    if rid != tid:
-        return []
-    rcode = rflags & 0x000F
-    if rcode != 0:
-        return []
-
-    off = 12
-    for _i in range(rqd):
-        off = skip_name(data, off)
-        off += 4
-
-    txt_values = []
-    for _i in range(ran):
-        off = skip_name(data, off)
-        if off + 10 > len(data):
-            break
-        rtype, rclass, ttl, rdlen = struct.unpack("!HHIH", data[off:off + 10])
-        off += 10
-        rdata = data[off:off + rdlen]
-        off += rdlen
-        if rclass != 1 or rtype != 16:
-            continue
-
         p = 0
         chunks = []
         while p < len(rdata):
@@ -822,214 +676,119 @@ def _dns_query_txt_tcp(name: str, server: str, timeout: float = 3.0) -> list:
             p += 1
             chunks.append(rdata[p:p + ln])
             p += ln
-        try:
-            txt_values.append(b"".join(chunks).decode("utf-8", errors="replace"))
-        except Exception:
-            txt_values.append(b"".join(chunks).decode(errors="replace"))
-
-    return txt_values
+        values.append(b"".join(chunks).decode("utf-8", errors="replace"))
+    return values
 
 
-def _dns_query_txt(name: str, server: str, timeout: float = 2.0) -> list:
-    """
-    Try UDP first; if response is truncated (TC=1) or yields nothing, fallback to TCP.
-    """
-    import random
-    import struct
-
-    # We keep UDP implementation as-is but detect TC bit by re-sending a tiny UDP query header parse.
-    # Minimal overhead; avoids rewriting your existing UDP parser.
-    def udp_tc_bit(qname: str) -> bool:
-        try:
-            # Build minimal UDP query to check flags quickly
-            def enc_qname(q: str) -> bytes:
-                q = q.rstrip(".")
-                out = b""
-                for part in q.split("."):
-                    if not part:
-                        continue
-                    b = part.encode("idna")
-                    out += bytes([len(b)]) + b
-                return out + b"\x00"
-
-            tid = random.randint(0, 0xFFFF)
-            flags = 0x0100
-            header = struct.pack("!HHHHHH", tid, flags, 1, 0, 0, 0)
-            question = enc_qname(qname) + struct.pack("!HH", 16, 1)
-            packet = header + question
-
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.settimeout(timeout)
-            try:
-                s.sendto(packet, (server, 53))
-                data, _ = s.recvfrom(4096)
-            finally:
-                s.close()
-
-            if len(data) < 12:
-                return False
-            rid, rflags, *_ = struct.unpack("!HHHHHH", data[:12])
-            if rid != tid:
-                return False
-            tc = (rflags & 0x0200) != 0
-            return tc
-        except Exception:
-            return False
-
-    # 1) UDP parse (your existing logic)
-    vals = []
+def _dns_query_txt(name: str, server: str, timeout: float = 2.0) -> list[str]:
     try:
-        vals = _dns_query_txt_udp(name, server, timeout=timeout)
-    except Exception:
-        vals = []
-
-    # 2) Fallback TCP if needed
-    if vals:
-        return vals
-
-    if udp_tc_bit(name):
-        # Truncated response very likely -> use TCP
-        try:
-            return _dns_query_txt_tcp(name, server, timeout=max(3.0, timeout))
-        except Exception:
-            return []
-
-    # If UDP gave nothing (maybe filtered), still try TCP once
-    try:
-        return _dns_query_txt_tcp(name, server, timeout=max(3.0, timeout))
+        return _dns_query_txt_udp(name, server, timeout=timeout)
     except Exception:
         return []
 
-def opt_dcv_dns_txt_precheck():
-    print("\nDIGICERT DCV - DNS TXT PRECHECK\n")
 
-    fqdn = prompt("TXT Record FQDN (e.g. _dnsauth.example.com) : ").strip()
-    if not fqdn:
-        return
+# ---------------------------
+# Option handlers
+# ---------------------------
 
-    expected = prompt("Expected TXT token (optional - press Enter to skip) : ").strip()
+def opt_install_check() -> None:
+    title("INSTALL/CHECK PYTHON CRYPTO BACKEND")
+    ensure_crypto()
 
-    # Public resolvers (same rationale as bash: if visible here, DigiCert likely sees it)
-    resolvers = ["1.1.1.1", "8.8.8.8"]
-    any_ok = False
 
-    print("\nQuerying public DNS resolvers...\n")
-
-    for r in resolvers:
-        print(f"Resolver: {r}")
-        try:
-            vals = _dns_query_txt(fqdn, r, timeout=2.0)
-        except Exception as e:
-            print(f"  ERROR: DNS query failed: {e}\n")
-            continue
-
-        if not vals:
-            print("  No TXT record found (or not propagated yet).\n")
-            continue
-
-        # Print found TXT RRs
-        print("  Found TXT:")
-        for v in vals:
-            print(f"    - {v}")
-        print("")
-
-        if expected:
-            match = any(expected in v for v in vals)
-            if match:
-                print("  MATCH: expected token is present on this resolver.\n")
-                any_ok = True
-            else:
-                print("  NO MATCH: expected token not found on this resolver.\n")
-        else:
-            print("  OK: TXT record(s) present. (No token provided for strict match)\n")
-            any_ok = True
-
-    if any_ok:
-        print("PRECHECK RESULT: PASS (at least one resolver confirms expected state).")
-    else:
-        print("PRECHECK RESULT: FAIL (no resolver confirms expected state).")
-
-def opt_create_rsa_privkey():
-    print("\nCREATING PRIVATE RSA ENCRYPTED KEY\n")
+def opt_create_rsa_privkey() -> None:
+    title("CREATE RSA PRIVATE KEY")
     if not ensure_crypto():
         return
 
-    filename = f"priv_key_{ts()}.pem"
-    print("1) RSA 2048 (standard)")
-    print("2) RSA 4096 (root)\n")
-    ch = prompt("").strip()
-
-    bits = 2048 if ch == "1" else 4096 if ch == "2" else None
+    print("1) RSA 2048")
+    print("2) RSA 4096")
+    bits_choice = prompt("Key size: ").strip()
+    bits = {"1": 2048, "2": 4096}.get(bits_choice)
     if bits is None:
+        err("Invalid key size selection.")
         return
 
-    pw1 = getpass("Encryption password (AES-256) : ")
-    if not pw1:
-        print("Empty password not allowed for encrypted key.")
-        return
-    pw2 = getpass("Confirm password : ")
-    if pw1 != pw2:
-        print("Passwords do not match.")
+    print("\n1) Encrypted with password (AES-256)")
+    print("2) Unencrypted / no password")
+    mode_choice = prompt("Protection mode: ").strip()
+    if mode_choice not in {"1", "2"}:
+        err("Invalid protection mode selection.")
         return
 
+    encryption_algorithm = None
+    protection_label = "unencrypted"
+    if mode_choice == "1":
+        pw1 = getpass("Encryption password (AES-256): ")
+        if not pw1:
+            err("Empty password not allowed for encrypted private keys.")
+            return
+        pw2 = getpass("Confirm password: ")
+        if pw1 != pw2:
+            err("Passwords do not match.")
+            return
+        encryption_algorithm = CRYPTO.serialization.BestAvailableEncryption(pw1.encode())
+        protection_label = "AES-256 encrypted"
+    else:
+        warn("Generating an unencrypted private key. Protect the output file carefully.")
+        encryption_algorithm = CRYPTO.serialization.NoEncryption()
+
+    filename = f"priv_key_RSA{bits}_{'enc' if mode_choice == '1' else 'nopass'}_{ts()}.pem"
     priv = CRYPTO.rsa.generate_private_key(public_exponent=65537, key_size=bits)
     pem = priv.private_bytes(
         encoding=CRYPTO.serialization.Encoding.PEM,
         format=CRYPTO.serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=CRYPTO.serialization.BestAvailableEncryption(pw1.encode()),
+        encryption_algorithm=encryption_algorithm,
     )
     write_file_bytes(filename, pem)
-    print(f"\nKey generated --> {filename}")
+    ok(f"Key generated ({bits}-bit, {protection_label}) --> {filename}")
 
 
-def opt_dump_key():
-    print("\nDUMP KEY DATA\n")
+def opt_dump_key() -> None:
+    title("DUMP KEY DATA")
     if not ensure_crypto():
         return
-
     list_dir()
-    print(" ")
-    varprivpem = prompt("Private Key PEM file : ").strip()
-    if not varprivpem:
+    key_path = prompt("Private Key PEM file: ").strip()
+    if not key_path:
         return
 
     print("\n1) Dump Public Key")
-    print("2) Dump Private Key (CONFIDENTIAL DATA)\n")
-    ch = prompt("").strip()
-    print(" ")
-
-    priv = load_private_key_pem(varprivpem)
+    print("2) Dump Private Key (CONFIDENTIAL DATA)")
+    choice = prompt("Selection: ").strip()
+    priv = load_private_key_pem(key_path)
     if priv is None:
         return
 
-    if ch == "1":
+    if choice == "1":
         pub = priv.public_key()
         pem_pub = pub.public_bytes(
             encoding=CRYPTO.serialization.Encoding.PEM,
             format=CRYPTO.serialization.PublicFormat.SubjectPublicKeyInfo,
         )
         print(pem_pub.decode(errors="ignore"))
-    elif ch == "2":
+    elif choice == "2":
+        warn("CONFIDENTIAL DATA")
         print(dump_private_key_text(priv))
+    else:
+        err("Invalid selection.")
 
 
-def opt_create_root_selfsigned():
-    print("\nCREATE ROOT SELF-SIGNED CERTIFICATE/CA\n")
+def opt_create_root_selfsigned() -> None:
+    title("CREATE ROOT SELF-SIGNED CERTIFICATE/CA")
     if not ensure_crypto():
         return
-
-    out_name = f"root_cert_selfsigned_{ts()}.pem"
     list_dir()
-    print(" ")
-
-    key_path = prompt("Private Key file (better to use RSA 4096): ").strip()
-    cn = prompt("Common Name (e.g. Lab Root CA) : ").strip()
-    org = prompt("Organization (e.g. Lab CA) : ").strip()
-    st = prompt("Country (2-letter code, e.g. US/IT) : ").strip()
+    out_name = f"root_cert_selfsigned_{ts()}.pem"
+    key_path = prompt("Private Key file (RSA 4096 recommended): ").strip()
+    cn = prompt("Common Name (e.g. Lab Root CA): ").strip()
+    org = prompt("Organization (e.g. Lab CA): ").strip()
+    country = prompt("Country (2-letter code, e.g. US/IT): ").strip()
     days_s = prompt("Days of Validity (e.g. 365): ").strip()
     try:
         days = int(days_s)
     except Exception:
+        err("Invalid validity days.")
         return
 
     priv = load_private_key_pem(key_path)
@@ -1037,95 +796,86 @@ def opt_create_root_selfsigned():
         return
 
     name = CRYPTO.x509.Name([
-        CRYPTO.x509.NameAttribute(CRYPTO.NameOID.COUNTRY_NAME, st),
+        CRYPTO.x509.NameAttribute(CRYPTO.NameOID.COUNTRY_NAME, country),
         CRYPTO.x509.NameAttribute(CRYPTO.NameOID.ORGANIZATION_NAME, org),
         CRYPTO.x509.NameAttribute(CRYPTO.NameOID.COMMON_NAME, cn),
     ])
-
     now = utc_now()
-    builder = CRYPTO.x509.CertificateBuilder()
-    builder = builder.subject_name(name)
-    builder = builder.issuer_name(name)
-    builder = builder.public_key(priv.public_key())
-    builder = builder.serial_number(CRYPTO.x509.random_serial_number())
-    builder = builder.not_valid_before(now - timedelta(minutes=1))
-    builder = builder.not_valid_after(now + timedelta(days=days))
-
-    builder = builder.add_extension(CRYPTO.x509.BasicConstraints(ca=True, path_length=None), critical=True)
-    builder = builder.add_extension(
-        CRYPTO.x509.KeyUsage(
-            digital_signature=True,
-            content_commitment=False,
-            key_encipherment=False,
-            data_encipherment=False,
-            key_agreement=False,
-            key_cert_sign=True,
-            crl_sign=True,
-            encipher_only=False,
-            decipher_only=False,
-        ),
-        critical=True,
+    cert = (
+        CRYPTO.x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(priv.public_key())
+        .serial_number(CRYPTO.x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(days=days))
+        .add_extension(CRYPTO.x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .add_extension(
+            CRYPTO.x509.KeyUsage(
+                digital_signature=True,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=True,
+                crl_sign=True,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(CRYPTO.x509.SubjectKeyIdentifier.from_public_key(priv.public_key()), critical=False)
+        .sign(private_key=priv, algorithm=CRYPTO.hashes.SHA256())
     )
-    builder = builder.add_extension(CRYPTO.x509.SubjectKeyIdentifier.from_public_key(priv.public_key()), critical=False)
-
-    cert = builder.sign(private_key=priv, algorithm=CRYPTO.hashes.SHA256())
     write_file_bytes(out_name, cert.public_bytes(CRYPTO.serialization.Encoding.PEM))
-    print(f"\nRoot Cert Self-Signed generated --> {out_name}")
+    ok(f"Root certificate generated --> {out_name}")
 
 
-def opt_create_csr():
-    print("\nCREATING CSR/PKCS#10\n")
+def opt_create_csr() -> None:
+    title("CREATE CSR/PKCS#10")
     if not ensure_crypto():
         return
-
-    reqname = f"csr_request_{ts()}.csr"
     list_dir()
-    print(" ")
-
-    priv_path = prompt("Private Key file : ").strip()
-    cn = prompt("Common Name (e.g. www.example.com) : ").strip()
-    org = prompt("Organization (e.g. Example) : ").strip()
-    st = prompt("Country (2-letter code, e.g. US/IT) : ").strip()
-    print("Additional Text")
-    print("e.g. subjectAltName=DNS:www.example.local,DNS:example.local,IP:10.0.0.1,email:admin@example.com,URI:https://example.com")
-    addtext = prompt("").strip()
+    req_name = f"csr_request_{ts()}.csr"
+    priv_path = prompt("Private Key file: ").strip()
+    cn = prompt("Common Name (e.g. www.example.com): ").strip()
+    org = prompt("Organization (e.g. Example): ").strip()
+    country = prompt("Country (2-letter code, e.g. US/IT): ").strip()
+    print("SAN example: subjectAltName=DNS:www.example.com,DNS:example.com,IP:10.0.0.1,email:admin@example.com")
+    addtext = prompt("Additional Text / SAN (optional): ").strip()
 
     priv = load_private_key_pem(priv_path)
     if priv is None:
         return
 
     subject = CRYPTO.x509.Name([
-        CRYPTO.x509.NameAttribute(CRYPTO.NameOID.COUNTRY_NAME, st),
+        CRYPTO.x509.NameAttribute(CRYPTO.NameOID.COUNTRY_NAME, country),
         CRYPTO.x509.NameAttribute(CRYPTO.NameOID.ORGANIZATION_NAME, org),
         CRYPTO.x509.NameAttribute(CRYPTO.NameOID.COMMON_NAME, cn),
     ])
-
     builder = CRYPTO.x509.CertificateSigningRequestBuilder().subject_name(subject)
-
     san = parse_addext_subject_alt_name(addtext)
     if san is not None:
         builder = builder.add_extension(san, critical=False)
-
     csr = builder.sign(priv, CRYPTO.hashes.SHA256())
-    write_file_bytes(reqname, csr.public_bytes(CRYPTO.serialization.Encoding.PEM))
-    print(f"\nRequest generated --> {reqname}")
+    write_file_bytes(req_name, csr.public_bytes(CRYPTO.serialization.Encoding.PEM))
+    ok(f"Request generated --> {req_name}")
 
 
-def opt_issue_cert():
-    print("\nISSUE CERTIFICATE WITH CSR AND LOCAL/TARGET CA\n")
+def opt_issue_cert() -> None:
+    title("ISSUE CERTIFICATE WITH CSR AND LOCAL/TARGET CA")
     if not ensure_crypto():
         return
-
     list_dir()
-    print(" ")
     issued = f"signed_issued_cert_{ts()}.pem"
-    csr_path = prompt("CSR file : ").strip()
-    ca_cert_path = prompt("Root CA Cert file : ").strip()
-    ca_key_path = prompt("Root CA Key file : ").strip()
+    csr_path = prompt("CSR file: ").strip()
+    ca_cert_path = prompt("Root CA Cert file: ").strip()
+    ca_key_path = prompt("Root CA Key file: ").strip()
     days_s = prompt("Days of Validity (e.g. 365): ").strip()
     try:
         days = int(days_s)
     except Exception:
+        err("Invalid validity days.")
         return
 
     csr = load_csr_pem(csr_path)
@@ -1135,22 +885,22 @@ def opt_issue_cert():
         return
 
     now = utc_now()
-    builder = CRYPTO.x509.CertificateBuilder()
-    builder = builder.subject_name(csr.subject)
-    builder = builder.issuer_name(ca_cert.subject)
-    builder = builder.public_key(csr.public_key())
-    builder = builder.serial_number(CRYPTO.x509.random_serial_number())
-    builder = builder.not_valid_before(now - timedelta(minutes=1))
-    builder = builder.not_valid_after(now + timedelta(days=days))
+    builder = (
+        CRYPTO.x509.CertificateBuilder()
+        .subject_name(csr.subject)
+        .issuer_name(ca_cert.subject)
+        .public_key(csr.public_key())
+        .serial_number(CRYPTO.x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(days=days))
+    )
 
-    # Copy requested extensions (parity with -copy_extensions copyall)
     try:
         for ext in csr.extensions:
             builder = builder.add_extension(ext.value, critical=ext.critical)
     except Exception:
         pass
 
-    # Ensure leaf constraints if missing (no noisy "verification" message)
     try:
         from cryptography.x509.oid import ExtensionOID
         builder.extensions.get_extension_for_oid(ExtensionOID.BASIC_CONSTRAINTS)
@@ -1159,20 +909,18 @@ def opt_issue_cert():
 
     cert = builder.sign(private_key=ca_key, algorithm=CRYPTO.hashes.SHA256())
     write_file_bytes(issued, cert.public_bytes(CRYPTO.serialization.Encoding.PEM))
-    print(f"\nIssued Certificate generated --> {issued}")
+    ok(f"Issued certificate generated --> {issued}")
 
 
-def opt_create_pkcs12():
-    print("\nCREATE PKCS#12\n")
+def opt_create_pkcs12() -> None:
+    title("CREATE PKCS#12")
     if not ensure_crypto():
         return
-
     list_dir()
     out_name = f"PKCS12_{ts()}.pfx"
-    print(" ")
-    priv_path = prompt("Client PEM Private Key file : ").strip()
-    cert_path = prompt("Client PEM Certificate file : ").strip()
-    chain_path = prompt("PEM Certificate Chain file related : ").strip()
+    priv_path = prompt("Client PEM Private Key file: ").strip()
+    cert_path = prompt("Client PEM Certificate file: ").strip()
+    chain_path = prompt("PEM Certificate Chain file related (optional): ").strip()
 
     priv = load_private_key_pem(priv_path)
     cert = load_cert_pem(cert_path)
@@ -1188,19 +936,16 @@ def opt_create_pkcs12():
                 bundle,
                 flags=re.S,
             )
-            for b in blocks:
+            for block in blocks:
                 try:
-                    chain_certs.append(CRYPTO.x509.load_pem_x509_certificate(b))
+                    chain_certs.append(CRYPTO.x509.load_pem_x509_certificate(block))
                 except TypeError:
-                    chain_certs.append(CRYPTO.x509.load_pem_x509_certificate(b, backend=CRYPTO.default_backend()))
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                    chain_certs.append(CRYPTO.x509.load_pem_x509_certificate(block, backend=CRYPTO.default_backend()))
+        except Exception as exc:
+            warn(f"Could not read chain file, continuing without chain: {exc}")
 
     pfx_pw = getpass("PKCS#12 export password (empty for none): ")
     enc = CRYPTO.serialization.BestAvailableEncryption(pfx_pw.encode()) if pfx_pw else CRYPTO.serialization.NoEncryption()
-
     pfx = CRYPTO.pkcs12.serialize_key_and_certificates(
         name=b"tls-cert",
         key=priv,
@@ -1209,89 +954,82 @@ def opt_create_pkcs12():
         encryption_algorithm=enc,
     )
     write_file_bytes(out_name, pfx)
-    print(f"\nPKCS#12 generated --> {out_name}")
+    ok(f"PKCS#12 generated --> {out_name}")
 
 
-def opt_dump_cert_local():
-    print("\nDUMP CERTIFICATE DATA\n")
+def opt_dump_cert_local() -> None:
+    title("DUMP CERTIFICATE DATA")
     if not ensure_crypto():
         return
-
     list_dir()
-    print(" ")
-    cert_path = prompt("Certificate CRT/PEM file : ").strip()
+    cert_path = prompt("Certificate CRT/PEM file: ").strip()
     cert = load_cert_pem(cert_path)
     if cert is None:
         return
 
     print("\n1) Dump just data/subject/issuer")
-    print("2) Dump ALL Certificate Data\n")
-    ch = prompt("").strip()
-    print(" ")
-
-    if ch == "1":
+    print("2) Dump ALL Certificate Data")
+    choice = prompt("Selection: ").strip()
+    if choice == "1":
         print(f"subject={cert.subject.rfc4514_string()}")
         print(f"issuer={cert.issuer.rfc4514_string()}")
         print(f"notBefore(UTC)={fmt_dt(cert_not_before(cert))}")
         print(f"notAfter(UTC)={fmt_dt(cert_not_after(cert))}")
-    elif ch == "2":
+    elif choice == "2":
         print(dump_cert_text(cert))
+    else:
+        err("Invalid selection.")
 
 
-def opt_dump_cert_online():
-    print("\nDUMP ONLINE CERTIFICATE DATA\n")
+def opt_dump_cert_online() -> None:
+    title("DUMP ONLINE CERTIFICATE DATA")
     if not ensure_crypto():
         return
-
-    host = prompt("Site to be checked (e.g. google.com) : ").strip()
-    port_s = prompt("Service port exposed (e.g. 443) : ").strip()
+    host = prompt("Site to be checked (e.g. google.com): ").strip()
+    port_s = prompt("Service port exposed (e.g. 443): ").strip()
     try:
         port = int(port_s)
     except Exception:
+        err("Invalid port.")
         return
-    print(" ")
 
     try:
         der = fetch_server_leaf_cert_der(host, port)
-    except Exception as e:
-        print(f"TLS fetch failed: {e}")
+    except Exception as exc:
+        err(f"TLS fetch failed: {exc}")
         return
 
     try:
         leaf = CRYPTO.x509.load_der_x509_certificate(der)
     except TypeError:
         leaf = CRYPTO.x509.load_der_x509_certificate(der, backend=CRYPTO.default_backend())
-
     print(dump_cert_text(leaf))
 
-    savelocal = prompt("Do you want to save it into a file or check it via OCSP ? ( Yes / No ) : ").strip()
-    if savelocal.lower() not in ("y", "yes"):
-        print("\nOk |m|")
+    if not yes(prompt("Save certificate locally and optionally check OCSP? (Yes/No): ")):
+        print("Ok |m|")
         return
 
-    targetpem = f"Cert_Dumped_{ts()}.pem"
-    write_file_bytes(targetpem, leaf.public_bytes(CRYPTO.serialization.Encoding.PEM))
-    print(f"\nCertificate saved --> {targetpem}\n")
+    target_pem = f"Cert_Dumped_{ts()}.pem"
+    write_file_bytes(target_pem, leaf.public_bytes(CRYPTO.serialization.Encoding.PEM))
+    ok(f"Certificate saved --> {target_pem}")
 
-    checkocsp = prompt("Do you want to check Certificate state via OCSP ? ( Yes / No ) : ").strip()
-    if checkocsp.lower() not in ("y", "yes"):
-        print("\nOk |m|")
+    if not yes(prompt("Check Certificate state via OCSP? (Yes/No): ")):
+        print("Ok |m|")
         return
 
     ocsp_url, issuer_url = extract_aia_uris(leaf)
     if not ocsp_url or not issuer_url:
-        print("Could not extract OCSP/CA Issuers URIs from certificate AIA.")
+        err("Could not extract OCSP/CA Issuers URIs from certificate AIA.")
         return
 
     base = f"Issuer_for_OCSP_query_{ts()}"
     cer_path = f"{base}.cer"
     pem_path = f"{base}.pem"
-
     try:
         issuer_bytes = http_get(issuer_url)
         write_file_bytes(cer_path, issuer_bytes)
-    except Exception as e:
-        print(f"Issuer download failed: {e}")
+    except Exception as exc:
+        err(f"Issuer download failed: {exc}")
         return
 
     issuer = None
@@ -1302,93 +1040,82 @@ def opt_dump_cert_online():
             issuer = CRYPTO.x509.load_pem_x509_certificate(issuer_bytes)
         except Exception:
             issuer = None
-
     if issuer is None:
-        print("Cannot parse issuer certificate.")
+        err("Cannot parse issuer certificate.")
         return
 
     write_file_bytes(pem_path, issuer.public_bytes(CRYPTO.serialization.Encoding.PEM))
-    print(f"\nIssuer Certificate CER --> {cer_path}")
-    print(f"Issuer Certificate PEM --> {pem_path}\n")
-
+    ok(f"Issuer Certificate CER --> {cer_path}")
+    ok(f"Issuer Certificate PEM --> {pem_path}")
     print(do_ocsp_query(leaf, issuer, ocsp_url))
 
 
-def opt_verify_csr():
-    print("\nCSR VERIFICATION\n")
+def opt_verify_csr() -> None:
+    title("CSR VERIFICATION")
     if not ensure_crypto():
         return
-
     list_dir()
-    print(" ")
-    csr_path = prompt("CSR file : ").strip()
+    csr_path = prompt("CSR file: ").strip()
     csr = load_csr_pem(csr_path)
     if csr is None:
         return
-    print(" ")
 
     try:
-        ok = csr.is_signature_valid
-        print(f"CSR signature valid: {ok}")
+        print(f"CSR signature valid: {csr.is_signature_valid}")
     except Exception:
-        print("CSR signature validity unknown (backend dependent).")
-
-    print("\nINSPECTING CSR\n")
+        warn("CSR signature validity unknown.")
+    title("INSPECTING CSR")
     print(dump_csr_text(csr))
 
 
-def opt_dump_pkcs12():
-    print("\nDUMP PKCS#12 DATA\n")
+def opt_dump_pkcs12() -> None:
+    title("DUMP PKCS#12 DATA")
     if not ensure_crypto():
         return
-
     list_dir()
     ts0 = ts()
-    extractedcert = f"Extracted_Cert_{ts0}.pem"
-    extractedchain = f"Extracted_Chain_{ts0}.pem"
-    extractedpriv = f"Extracted_PrivKey_{ts0}.pem"
-    print(" ")
-    pfx_path = prompt("PKCS#12 PFX file : ").strip()
+    extracted_cert = f"Extracted_Cert_{ts0}.pem"
+    extracted_chain = f"Extracted_Chain_{ts0}.pem"
+    extracted_priv = f"Extracted_PrivKey_{ts0}.pem"
 
+    pfx_path = prompt("PKCS#12 PFX file: ").strip()
     print("\n1) General Inspection")
     print("2) Extract Cert PEM and Chain PEM")
-    print("3) Extract Priv Key CONFIDENTIAL DATA\n")
-    ch = prompt("").strip()
-    print(" ")
+    print("3) Extract Priv Key (CONFIDENTIAL DATA)")
+    choice = prompt("Selection: ").strip()
 
     try:
         pfx_bytes = read_file_bytes(pfx_path)
-    except Exception as e:
-        print(f"Cannot read PFX: {e}")
+    except Exception as exc:
+        err(f"Cannot read PFX: {exc}")
         return
 
     pw = getpass("PKCS#12 password (empty if none): ")
     password = pw.encode() if pw else None
-
     try:
         key, cert, cas = CRYPTO.pkcs12.load_key_and_certificates(pfx_bytes, password=password)
-    except Exception as e:
-        print(f"PKCS#12 parse failed: {e}")
+    except Exception as exc:
+        err(f"PKCS#12 parse failed: {exc}")
         return
 
-    if ch == "1":
+    if choice == "1":
         print("PKCS#12:")
         print(f"  Has private key: {bool(key)}")
-        print(f"  Has leaf cert:   {bool(cert)}")
-        print(f"  Chain length:    {len(cas) if cas else 0}")
+        print(f"  Has leaf cert : {bool(cert)}")
+        print(f"  Chain length  : {len(cas) if cas else 0}")
         if cert:
             print("\nLeaf certificate:\n" + dump_cert_text(cert))
-    elif ch == "2":
+    elif choice == "2":
         if cert:
-            write_file_bytes(extractedcert, cert.public_bytes(CRYPTO.serialization.Encoding.PEM))
-            print(f"\nExtracted Cert PEM file --> {extractedcert}")
+            write_file_bytes(extracted_cert, cert.public_bytes(CRYPTO.serialization.Encoding.PEM))
+            ok(f"Extracted Cert PEM file --> {extracted_cert}")
         if cas:
-            chain_pem = b"".join([c.public_bytes(CRYPTO.serialization.Encoding.PEM) for c in cas])
-            write_file_bytes(extractedchain, chain_pem)
-            print(f"Extracted Chain PEM file --> {extractedchain}")
-    elif ch == "3":
+            chain_pem = b"".join(c.public_bytes(CRYPTO.serialization.Encoding.PEM) for c in cas)
+            write_file_bytes(extracted_chain, chain_pem)
+            ok(f"Extracted Chain PEM file --> {extracted_chain}")
+    elif choice == "3":
         if key is None:
-            print("No private key in PKCS#12.")
+            err("No private key in PKCS#12.")
             return
         out_pw = getpass("Output private key encryption password (empty for none): ")
         enc = CRYPTO.serialization.BestAvailableEncryption(out_pw.encode()) if out_pw else CRYPTO.serialization.NoEncryption()
@@ -1397,68 +1124,97 @@ def opt_dump_pkcs12():
             format=CRYPTO.serialization.PrivateFormat.PKCS8,
             encryption_algorithm=enc,
         )
-        write_file_bytes(extractedpriv, pem)
-        print(f"\nExtracted Private Key PEM file --> {extractedpriv}")
-        print("CONFIDENTIAL DATA")
+        write_file_bytes(extracted_priv, pem)
+        ok(f"Extracted Private Key PEM file --> {extracted_priv}")
+        warn("CONFIDENTIAL DATA")
+    else:
+        err("Invalid selection.")
+
+
+def opt_dcv_dns_txt_precheck() -> None:
+    title("DIGICERT DCV - DNS TXT PRECHECK")
+    fqdn = prompt("TXT Record FQDN (e.g. _dnsauth.example.com): ").strip()
+    if not fqdn:
+        return
+    expected = prompt("Expected TXT token (optional - press Enter to skip): ").strip()
+    resolvers = ["1.1.1.1", "8.8.8.8"]
+    any_ok = False
+    print("\nQuerying public DNS resolvers...\n")
+
+    for resolver in resolvers:
+        print(paint(f"Resolver: {resolver}", C.MAGENTA))
+        values = _dns_query_txt(fqdn, resolver, timeout=2.0)
+        if not values:
+            err("  No TXT record found (or not propagated yet).")
+            print()
+            continue
+        print("  Found TXT:")
+        for value in values:
+            print(f"   - {value}")
+        if expected:
+            if any(expected in value for value in values):
+                ok("  MATCH: expected token is present on this resolver.")
+                any_ok = True
+            else:
+                err("  NO MATCH: expected token not found on this resolver.")
+        else:
+            ok("  OK: TXT record(s) present. No token provided for strict match.")
+            any_ok = True
+        print()
+
+    ok("PRECHECK RESULT: PASS") if any_ok else err("PRECHECK RESULT: FAIL")
 
 
 # ---------------------------
-# Main option router
+# Main router
 # ---------------------------
 
-def read_option():
-    choice = prompt("Enter choice : ").strip()
-
-    if choice == "1":
-        clear_screen()
-        opt_install_check()
+def read_option() -> None:
+    choice = prompt("Enter choice: ").strip()
+    if choice == "0":
+        clear_screen(); show_help()
+    elif choice == "1":
+        clear_screen(); opt_install_check()
     elif choice == "2":
-        clear_screen()
-        opt_create_rsa_privkey()
+        clear_screen(); opt_create_rsa_privkey()
     elif choice == "3":
-        clear_screen()
-        opt_dump_key()
+        clear_screen(); opt_dump_key()
     elif choice == "4":
-        clear_screen()
-        opt_create_root_selfsigned()
+        clear_screen(); opt_create_root_selfsigned()
     elif choice == "5":
-        clear_screen()
-        opt_create_csr()
+        clear_screen(); opt_create_csr()
     elif choice == "6":
-        clear_screen()
-        opt_issue_cert()
+        clear_screen(); opt_issue_cert()
     elif choice == "7":
-        clear_screen()
-        opt_create_pkcs12()
+        clear_screen(); opt_create_pkcs12()
     elif choice == "8":
-        clear_screen()
-        opt_dump_cert_local()
+        clear_screen(); opt_dump_cert_local()
     elif choice == "9":
-        clear_screen()
-        opt_dump_cert_online()
+        clear_screen(); opt_dump_cert_online()
     elif choice == "10":
-        clear_screen()
-        opt_verify_csr()
+        clear_screen(); opt_verify_csr()
     elif choice == "11":
-        clear_screen()
-        opt_dump_pkcs12()
+        clear_screen(); opt_dump_pkcs12()
     elif choice == "12":
-        clear_screen()
-        opt_dcv_dns_txt_precheck()
+        clear_screen(); opt_dcv_dns_txt_precheck()
     elif choice == "99":
-        print("\nHack the Planet |m|\n")
+        print(paint("\nHack the Planet |m|\n", C.GREEN))
         raise SystemExit(0)
     else:
         clear_screen()
-        print("\nInvalid option. Please try again.")
+        err("Invalid option. Please try again.")
 
 
-def main():
+def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] in {"-h", "--help", "help"}:
+        show_help()
+        return
+
     while True:
         show_banner()
         show_menu()
         read_option()
-        print(" ")
+        print()
 
 
 if __name__ == "__main__":
